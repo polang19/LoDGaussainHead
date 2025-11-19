@@ -25,7 +25,6 @@ class ParamGroup:
                 shorthand = True
                 key = key[1:]
             t = type(value)
-            original_value = value  # Store original value to check type
             value = value if not fill_none else None 
             if shorthand:
                 if t == bool:
@@ -33,16 +32,6 @@ class ParamGroup:
                 elif t == list:
                     # Handle list type arguments (e.g., time_ratios)
                     group.add_argument("--" + key, ("-" + key[0:1]), default=value, type=float, nargs='+')
-                elif value is None:
-                    # Handle None default: check original type to determine correct type
-                    # For string types (like model_path), use str, not int
-                    if original_value is None or t == str:
-                        # For string types, use empty string as default if original was empty string
-                        default_val = "" if t == str and original_value == "" else value
-                        group.add_argument("--" + key, ("-" + key[0:1]), default=default_val, type=str, nargs='?')
-                    else:
-                        # For other types (like int), use int
-                        group.add_argument("--" + key, ("-" + key[0:1]), default=value, type=int, nargs='?')
                 else:
                     group.add_argument("--" + key, ("-" + key[0:1]), default=value, type=t)
             else:
@@ -51,16 +40,6 @@ class ParamGroup:
                 elif t == list:
                     # Handle list type arguments (e.g., time_ratios)
                     group.add_argument("--" + key, default=value, type=float, nargs='+')
-                elif value is None:
-                    # Handle None default: check original type to determine correct type
-                    # For string types (like model_path), use str, not int
-                    if original_value is None or t == str:
-                        # For string types, use empty string as default if original was empty string
-                        default_val = "" if t == str and original_value == "" else value
-                        group.add_argument("--" + key, default=default_val, type=str, nargs='?')
-                    else:
-                        # For other types (like int), use int
-                        group.add_argument("--" + key, default=value, type=int, nargs='?')
                 else:
                     group.add_argument("--" + key, default=value, type=t)
 
@@ -134,13 +113,6 @@ class OptimizationParams(ParamGroup):
         self.lambda_laplacian = 0.
         self.lambda_dynamic_offset_std = 0  #1.
         
-        # Phase 1 Task 1.4: Unbinding mode position loss
-        self.lambda_unbound_pos = 0.1  # Position loss weight for unbinding mode
-        self.unbound_pos_threshold = 0.15  # Position threshold (15cm) for unbinding mode
-        
-        # Phase 1 Task 1.5: Temporal smoothness constraint
-        self.lambda_temporal = 0.01  # Temporal smoothness loss weight
-        
         # Gumbel network training (Phase B)
         self.is_gumbel = False  # Enable Gumbel network training
         self.gumbel_lr = 1e-4  # Learning rate for Gumbel network
@@ -150,14 +122,7 @@ class OptimizationParams(ParamGroup):
         self.time_ratios = [0.3, 0.5, 0.7]  # Compression ratios for multi-ratio training
         self.coarse_iterations = 30000  # Number of iterations for coarse stage (without Gumbel)
         self.fine_iterations = 50000  # Number of iterations for fine stage (with Gumbel)
-        self.gumbel_start_iter = 25000  # Start iteration for Gumbel training
-        
-        # Pruning (Document 1 method: two-phase training)
-        self.enable_pruning = False  # Enable permanent pruning after training
-        self.prune_ratio = 0.3  # Target compression ratio for pruning (0.0-1.0)
-        self.prune_after_iteration = None  # Iteration after which to perform pruning (None = after training completes)
-        self.fine_tune_iterations = 5000  # Number of fine-tuning iterations after pruning
-        self.prune_enforce_binding = False  # Whether to enforce binding constraint during pruning (False = unbind mode)
+        self.gumbel_start_iter = 0  # Start iteration for Gumbel training (0 = start from beginning, e.g., 25000 = start at iteration 25000)
 
         super().__init__(parser, "Optimization Parameters")
 
