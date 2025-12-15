@@ -140,6 +140,37 @@ class FlameGaussianModel(GaussianModel):
             dynamic_offset=flame_param['dynamic_offset'][[timestep]],
         )
         self.update_mesh_properties(verts, verts_cano)
+
+    def interpolate_mesh_by_timesteps(self, timestep1, timestep2, alpha):
+        self.timestep = timestep1
+        flame_param = self.flame_param_orig if self.flame_param_orig != None else self.flame_param
+
+        alpha = max(0.0, min(1.0, float(alpha)))
+
+        interpolated_params = {}
+        for key in flame_param.keys():
+            if key == 'shape' or key == 'static_offset':
+                interpolated_params[key] = flame_param[key]
+            else:
+                param1 = flame_param[key][[timestep1]] if flame_param[key].dim() > 1 else flame_param[key]
+                param2 = flame_param[key][[timestep2]] if flame_param[key].dim() > 1 else flame_param[key]
+                interpolated_params[key] = (1 - alpha) * param1 + alpha * param2
+
+        verts, verts_cano = self.flame_model(
+            interpolated_params['shape'][None, ...],
+            interpolated_params['expr'],
+            interpolated_params['rotation'],
+            interpolated_params['neck_pose'],
+            interpolated_params['jaw_pose'],
+            interpolated_params['eyes_pose'],
+            interpolated_params['translation'],
+            zero_centered_at_root_node=False,
+            return_landmarks=False,
+            return_verts_cano=True,
+            static_offset=interpolated_params['static_offset'],
+            dynamic_offset=interpolated_params['dynamic_offset'],
+        )
+        self.update_mesh_properties(verts, verts_cano)
     
     def update_mesh_properties(self, verts, verts_cano):
         faces = self.flame_model.faces

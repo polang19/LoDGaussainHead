@@ -18,9 +18,9 @@ from os import makedirs
 import concurrent.futures
 import multiprocessing
 from pathlib import Path
-from tqdm import tqdm
 from PIL import Image
 import numpy as np
+import copy
 
 from gaussian_renderer import render, gumbel_select_render_flame
 from utils.general_utils import safe_state
@@ -53,7 +53,8 @@ def write_data(path2data):
 
 def render_set(dataset : ModelParams, name, iteration, views, gaussians, pipeline, background, render_mesh,
                compression_ratio=1.0, use_semantic_weights=False, unbind_selection=False,
-               scale_expansion=False, scale_expansion_mode="volume", use_gumbel=False):
+               scale_expansion=False, scale_expansion_mode="volume", use_gumbel=False,
+               interpolate_frames=False, frames_per_timestep=1):
     if dataset.select_camera_id != -1:
         name = f"{name}_{dataset.select_camera_id}"
     
@@ -118,7 +119,58 @@ def render_set(dataset : ModelParams, name, iteration, views, gaussians, pipelin
         if scale_expansion:
             print(f"[Compression] Scale expansion enabled (mode: {scale_expansion_mode})")
 
-    views_loader = DataLoader(views, batch_size=None, shuffle=False, num_workers=8)
+    views = sorted(views, key=lambda v: (
+        v.timestep if v.timestep is not None else -1,
+        getattr(v, 'camera_id', -1) if hasattr(v, 'camera_id') else -1
+    ))
+
+    if interpolate_frames and frames_per_timestep > 0 and hasattr(gaussians, 'interpolate_mesh_by_timesteps'):
+        views_by_camera_timestep = {}
+        for view in views:
+            ts = view.timestep if view.timestep is not None else -1
+            cam_id = getattr(view, 'camera_id', -1) if hasattr(view, 'camera_id') else -1
+            key = (cam_id, ts)
+            if key not in views_by_camera_timestep:
+                views_by_camera_timestep[key] = []
+            views_by_camera_timestep[key].append(view)
+
+        unique_cameras = sorted(set(k[0] for k in views_by_camera_timestep.keys()))
+        all_timesteps = sorted(set(k[1] for k in views_by_camera_timestep.keys() if k[1] != -1))
+
+        if len(all_timesteps) > 1:
+            interpolated_views = []
+            for cam_id in unique_cameras:
+                camera_timesteps = sorted(set(
+                    k[1] for k in views_by_camera_timestep.keys() if k[0] == cam_id and k[1] != -1
+                ))
+                if len(camera_timesteps) > 1:
+                    for i in range(len(camera_timesteps)):
+                        ts = camera_timesteps[i]
+                        key = (cam_id, ts)
+                        if key in views_by_camera_timestep:
+                            interpolated_views.extend(views_by_camera_timestep[key])
+                        if i < len(camera_timesteps) - 1:
+                            ts_next = camera_timesteps[i + 1]
+                            base_view = None
+                            if key in views_by_camera_timestep and len(views_by_camera_timestep[key]) > 0:
+                                base_view = views_by_camera_timestep[key][0]
+                            if base_view is not None:
+                                for frame_idx in range(1, frames_per_timestep + 1):
+                                    alpha = frame_idx / (frames_per_timestep + 1)
+                                    interp_view = copy.deepcopy(base_view)
+                                    interp_view._is_interpolated = True
+                                    interp_view._interp_ts1 = ts
+                                    interp_view._interp_ts2 = ts_next
+                                    interp_view._interp_alpha = alpha
+                                    interp_view.timestep = ts
+                                    interpolated_views.append(interp_view)
+            views = interpolated_views
+            views = sorted(views, key=lambda v: (
+                v.timestep if v.timestep is not None else -1,
+                getattr(v, 'camera_id', -1) if hasattr(v, 'camera_id') else -1
+            ))
+
+    views_loader = DataLoader(views, batch_size=None, shuffle=False, num_workers=0 if interpolate_frames else 8)
     max_threads = multiprocessing.cpu_count()
     print('Max threads: ', max_threads)
     worker_args = []
@@ -126,7 +178,10 @@ def render_set(dataset : ModelParams, name, iteration, views, gaussians, pipelin
         # Only call select_mesh_by_timestep if it's a FlameGaussianModel
         # GaussianModel doesn't support this method (raises NotImplementedError)
         if gaussians.binding != None and hasattr(gaussians, 'flame_model'):
-            gaussians.select_mesh_by_timestep(view.timestep)
+            if hasattr(view, '_is_interpolated') and view._is_interpolated and hasattr(gaussians, 'interpolate_mesh_by_timesteps'):
+                gaussians.interpolate_mesh_by_timesteps(view._interp_ts1, view._interp_ts2, view._interp_alpha)
+            else:
+                gaussians.select_mesh_by_timestep(view.timestep)
         
         # Use Gumbel network rendering if enabled, otherwise use standard rendering
         if use_gumbel_for_rendering:
@@ -201,7 +256,8 @@ def render_set(dataset : ModelParams, name, iteration, views, gaussians, pipelin
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_val : bool, skip_test : bool, render_mesh: bool,
                 compression_ratio=1.0, use_semantic_weights=False, unbind_selection=False,
-                scale_expansion=False, scale_expansion_mode="volume", use_gumbel=False):
+                scale_expansion=False, scale_expansion_mode="volume", use_gumbel=False,
+                interpolate_frames=False, frames_per_timestep=1):
     with torch.no_grad():
         # Determine model type: try to use FlameGaussianModel if FLAME model file exists
         # or if dataset.bind_to_mesh is True (indicates FLAME model was used during training)
@@ -341,22 +397,26 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
              # when loading from a target path, test cameras are merged into the train cameras
              render_set(dataset, f'{name}', scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, render_mesh,
                        compression_ratio=compression_ratio, use_semantic_weights=use_semantic_weights, unbind_selection=unbind_selection,
-                       scale_expansion=scale_expansion, scale_expansion_mode=scale_expansion_mode, use_gumbel=use_gumbel_model)
+                       scale_expansion=scale_expansion, scale_expansion_mode=scale_expansion_mode, use_gumbel=use_gumbel_model,
+                       interpolate_frames=interpolate_frames, frames_per_timestep=frames_per_timestep)
         else:
             if not skip_train:
                 render_set(dataset, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background, render_mesh,
                           compression_ratio=compression_ratio, use_semantic_weights=use_semantic_weights, unbind_selection=unbind_selection,
-                          scale_expansion=scale_expansion, scale_expansion_mode=scale_expansion_mode, use_gumbel=use_gumbel_model)
+                          scale_expansion=scale_expansion, scale_expansion_mode=scale_expansion_mode, use_gumbel=use_gumbel_model,
+                          interpolate_frames=interpolate_frames, frames_per_timestep=frames_per_timestep)
             
             if not skip_val:
                 render_set(dataset, "val", scene.loaded_iter, scene.getValCameras(), gaussians, pipeline, background, render_mesh,
                           compression_ratio=compression_ratio, use_semantic_weights=use_semantic_weights, unbind_selection=unbind_selection,
-                          scale_expansion=scale_expansion, scale_expansion_mode=scale_expansion_mode, use_gumbel=use_gumbel_model)
+                          scale_expansion=scale_expansion, scale_expansion_mode=scale_expansion_mode, use_gumbel=use_gumbel_model,
+                          interpolate_frames=interpolate_frames, frames_per_timestep=frames_per_timestep)
 
             if not skip_test:
                 render_set(dataset, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background, render_mesh,
                           compression_ratio=compression_ratio, use_semantic_weights=use_semantic_weights, unbind_selection=unbind_selection,
-                          scale_expansion=scale_expansion, scale_expansion_mode=scale_expansion_mode, use_gumbel=use_gumbel_model)
+                          scale_expansion=scale_expansion, scale_expansion_mode=scale_expansion_mode, use_gumbel=use_gumbel_model,
+                          interpolate_frames=interpolate_frames, frames_per_timestep=frames_per_timestep)
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -384,6 +444,8 @@ if __name__ == "__main__":
                        help="Scale expansion mode: 'volume' (volume-preserving) or 'linear' (default: volume)")
     parser.add_argument("--use_gumbel", action="store_true",
                        help="Use trained Gumbel network for point selection (requires model trained with --is_gumbel)")
+    parser.add_argument("--interpolate_frames", action="store_true")
+    parser.add_argument("--frames_per_timestep", type=int, default=1)
     
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
@@ -408,4 +470,6 @@ if __name__ == "__main__":
                 unbind_selection=args.unbind_selection,
                 scale_expansion=args.scale_expansion,
                 scale_expansion_mode=args.scale_expansion_mode,
-                use_gumbel=args.use_gumbel)
+                use_gumbel=args.use_gumbel,
+                interpolate_frames=args.interpolate_frames,
+                frames_per_timestep=args.frames_per_timestep)

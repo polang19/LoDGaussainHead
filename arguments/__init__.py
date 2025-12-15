@@ -147,7 +147,9 @@ class OptimizationParams(ParamGroup):
         self.gumbel_weight = 1.0  # Weight for Gumbel loss (L_hard)
         self.gumbel_ratio_weight = 1.0  # Weight for Gumbel ratio loss (L_hard_1) - increased from 0.01 to enforce ratio constraint
         self.select_interval = 1000  # Interval for updating importance scores (iterations, default 1000 to match FlexGS performance)
+        self.delay_iterations = 10000  # Delay importance computation for first N iterations
         self.time_ratios = [0.3, 0.5, 0.7]  # Compression ratios for multi-ratio training
+        self.ratio_weights = [0.5, 0.3, 0.2]  # Sampling weights for time_ratios
         self.coarse_iterations = 30000  # Number of iterations for coarse stage (without Gumbel)
         self.fine_iterations = 50000  # Number of iterations for fine stage (with Gumbel)
         self.gumbel_start_iter = 25000  # Start iteration for Gumbel training

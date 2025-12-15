@@ -11,6 +11,7 @@
 
 import os
 import torch
+import numpy as np
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from random import randint
@@ -169,16 +170,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if iteration == first_iter:
             print(f"[DEBUG] use_gumbel={use_gumbel}, iteration={iteration}")
         if use_gumbel:
-            # Multi-ratio training: cycle through different compression ratios
             time_ratios = getattr(opt, 'time_ratios', [0.3, 0.5, 0.7])
-            ratio = time_ratios[iteration % len(time_ratios)]
+            ratio_weights = getattr(opt, 'ratio_weights', None)
+            if ratio_weights is None or len(ratio_weights) != len(time_ratios):
+                ratio_weights = [1.0 / len(time_ratios)] * len(time_ratios)
+            ratio_weights = np.array(ratio_weights, dtype=np.float64)
+            ratio_weights = ratio_weights / ratio_weights.sum()
+            ratio = float(np.random.choice(time_ratios, p=ratio_weights))
             
             # Update importance scores periodically using async computation
             # Note: FlexGS uses select_interval=1000 for better performance
             # We use 1000 as default to match FlexGS performance
-            # Also delay importance computation for first 10000 iterations to speed up early training
+            # Also delay importance computation for early iterations to speed up training
             select_interval = getattr(opt, 'select_interval', 1000)
-            delay_iterations = 10000  # Don't compute importance for first N iterations
+            delay_iterations = getattr(opt, 'delay_iterations', 10000)
             
             # Check if we should start/update importance computation
             # Skip computation on first iteration to avoid blocking
@@ -333,21 +338,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # All sizes match, proceed with Gumbel loss calculation
                     gumbel_weight = getattr(opt, 'gumbel_weight', 1.0)
                     time_ratios = getattr(opt, 'time_ratios', [0.3, 0.5, 0.7])
-                    ratio = time_ratios[iteration % len(time_ratios)]
+                    ratio_weights = getattr(opt, 'ratio_weights', None)
+                    if ratio_weights is None or len(ratio_weights) != len(time_ratios):
+                        ratio_weights = [1.0 / len(time_ratios)] * len(time_ratios)
+                    ratio_weights = np.array(ratio_weights, dtype=np.float64)
+                    ratio_weights = ratio_weights / ratio_weights.sum()
+                    ratio = float(np.random.choice(time_ratios, p=ratio_weights))
                     
                     # Generate pseudo-label from importance scores
-                    sorted_imp_list, _ = torch.sort(imp_list, dim=0)
-                    index_nth_percentile = int((1 - ratio) * (sorted_imp_list.shape[0] - 1))
-                    if index_nth_percentile < 0:
-                        index_nth_percentile = 0
-                    if index_nth_percentile >= len(sorted_imp_list):
-                        index_nth_percentile = len(sorted_imp_list) - 1
-                    value_nth_percentile = sorted_imp_list[index_nth_percentile]
+                    N = imp_list.shape[0]
+                    k = max(1, min(int((1 - ratio) * N), N))
+                    value_nth_percentile, _ = torch.kthvalue(imp_list, k, dim=0)
                     pseudo_gt_mask = (imp_list > value_nth_percentile).float()
                     
                     # L_hard: Match pseudo-label
-                    if gumbel_soft_mask.shape[0] == pseudo_gt_mask.shape[0]:
-                        losses['gumbel_hard'] = F.l1_loss(gumbel_soft_mask, pseudo_gt_mask) * gumbel_weight
+                    if gumbel_hard_mask.shape[0] == pseudo_gt_mask.shape[0]:
+                        losses['gumbel_hard'] = F.l1_loss(gumbel_hard_mask.float(), pseudo_gt_mask) * gumbel_weight
                     
                     # L_hard_1: Constrain selection ratio
                     actual_ratio = gumbel_hard_mask.sum() / len(gumbel_hard_mask)
